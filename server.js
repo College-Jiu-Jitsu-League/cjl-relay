@@ -114,11 +114,26 @@ function upsertBoutHistory(state) {
 
 
 const server = http.createServer((req, res) => {
+  // CORS preflight for the control panel's POST.
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, GET, OPTIONS' });
+    res.end();
+    return;
+  }
   if (req.url === '/clear-history') {
+    // POST only, so a link preview / crawler / stray browser visit can't wipe it.
+    if (req.method !== 'POST') {
+      res.writeHead(405, { 'Content-Type': 'text/plain', 'Allow': 'POST' });
+      res.end('Use POST');
+      return;
+    }
     archivedBouts.length = 0;
+    // New tournament: forget the old bracket too, so status pages don't show
+    // last event's bracket until the first control panel connects.
+    bracketCache = null;
     broadcastHistory();
-    console.log('Match history cleared via /clear-history (new tournament started).');
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    console.log('Match history and cached bracket cleared via /clear-history (new tournament started).');
+    res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
     res.end('History cleared');
     return;
   }
