@@ -15,6 +15,34 @@ const channels = {};
 // replayed into a brand-new one just because the relay never restarted.
 // =========================================================================
 const stateCache = {};
+// Which mats have a control panel open right now: mat → Set of control-panel sockets.
+// Viewers on a mat's channel get {type:'controller', mat, online} whenever it changes,
+// so the public page only shows mats that are actually being run.
+const controllers = {};
+const CONTROLLER_GRACE_MS = 8000;   // a control-panel refresh doesn't make the mat blink off
+function controllerOnline(mat) { return !!(controllers[mat] && controllers[mat].size); }
+function notifyController(mat) {
+  const ch = 'mat_' + mat;
+  if (!channels[ch]) return;
+  const payload = JSON.stringify({ type: 'controller', mat: String(mat), online: controllerOnline(mat) });
+  channels[ch].forEach(c => { if (c.readyState === 1) c.send(payload); });
+}
+function setController(ws, mat) {
+  mat = String(mat);
+  if (ws.controlsMat === mat) return;
+  dropController(ws, true);
+  ws.controlsMat = mat;
+  (controllers[mat] = controllers[mat] || new Set()).add(ws);
+  notifyController(mat);
+}
+function dropController(ws, now) {
+  const mat = ws.controlsMat;
+  if (!mat || !controllers[mat]) return;
+  controllers[mat].delete(ws);
+  ws.controlsMat = null;
+  if (now) notifyController(mat);
+  else setTimeout(() => { if (!controllerOnline(mat)) notifyController(mat); }, CONTROLLER_GRACE_MS);
+}
 const STATE_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes — covers a real refresh/reconnect; anything older is a different session
 
 // =========================================================================
@@ -168,13 +196,16 @@ wss.on('connection', (ws) => {
       // dropped instead of replayed.
       // =========================================================================
       const cached = stateCache[ch];
+      const matOfCh = ch.indexOf('mat_') === 0 ? ch.slice(4) : null;
       if (cached) {
-        if (Date.now() - cached.ts <= STATE_CACHE_TTL_MS) {
+        if (Date.now() - cached.ts <= STATE_CACHE_TTL_MS || (matOfCh && controllerOnline(matOfCh))) {
           ws.send(JSON.stringify({ type: 'sync_state', state: cached.msg }));
         } else {
           delete stateCache[ch];
         }
       }
+
+      if (matOfCh) ws.send(JSON.stringify({ type: 'controller', mat: matOfCh, online: controllerOnline(matOfCh) }));
 
       // Newly joined 'history' subscribers get whatever's been archived so far.
       if (ch === 'history') {
@@ -194,8 +225,13 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'bracket', data: bracketCache }));
       }
 
+    } else if (msg.type === 'controller') {
+      // A control panel announcing which mat it runs.
+      if (msg.mat !== undefined && msg.mat !== null) setController(ws, msg.mat);
+
     } else if (msg.type === 'state') {
       const ch = 'mat_' + msg.mat;
+      setController(ws, msg.mat);   // whoever sends a mat's state is running that mat
 
       // Keep the bout's history entry current with whatever matches have
       // been submitted so far — fires on every submitted match, not just
@@ -230,6 +266,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
+    dropController(ws, false);
     if (joinedChannel && channels[joinedChannel]) {
       channels[joinedChannel].delete(ws);
       if (joinedChannel === 'presence') broadcastPresence();
@@ -237,6 +274,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('error', () => {
+    dropController(ws, false);
     if (joinedChannel && channels[joinedChannel]) {
       channels[joinedChannel].delete(ws);
       if (joinedChannel === 'presence') broadcastPresence();
